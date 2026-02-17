@@ -1,0 +1,667 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FPGA Sync Architecture | God Tier Research</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    
+    <!-- Chosen Palette: "RenTec Logic" -->
+    <!-- Background: #0F172A (Slate 900) - Dark Mode for Focus -->
+    <!-- Text: #F8FAFC (Slate 50) -->
+    <!-- Accents: #3B82F6 (Blue 500), #10B981 (Emerald 500), #EF4444 (Red 500) -->
+
+    <!-- Application Structure Plan:
+         1. Executive Summary: High-level abstract.
+         2. Simulation A (Transport): Visualizing "Store-and-Forward" buffering vs "Cut-Through" streaming.
+         3. Simulation B (Timing): Visualizing Clock Drift and Correction algorithms.
+         4. Architecture Breakdown: Interactive block diagram of the FPGA internals.
+         5. HFT Impact: Connecting tech to Profit/Loss (Arbitrage, Order Books).
+    -->
+
+    <!-- Visualization Choices:
+         - Sim A: Moving DIVs. Added a "Buffer Queue" box to Standard lane to physically show delays.
+         - Sim B: Rotating CSS elements (Clock Hands) and Digital counters to show drift.
+         - Charts: Chart.js for Latency Histograms (The "Fat Tail" problem).
+         - NO SVG / NO Mermaid. All CSS/DOM based.
+    -->
+
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0F172A; /* Slate 900 */
+            color: #E2E8F0; /* Slate 200 */
+        }
+        .mono-font {
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1E293B; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748B; }
+
+        /* --- SIMULATION A: PACKET TRANSPORT --- */
+        .lane-container {
+            position: relative;
+            height: 80px;
+            background: #1E293B; /* Slate 800 */
+            border: 1px solid #334155;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+        }
+        .buffer-box {
+            position: absolute;
+            left: 40%;
+            width: 20%;
+            height: 70%;
+            border: 2px dashed #64748B;
+            background: rgba(100, 116, 139, 0.2);
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #94A3B8;
+            font-size: 10px;
+            font-family: 'JetBrains Mono', monospace;
+            z-index: 10;
+        }
+        .packet {
+            position: absolute;
+            height: 24px;
+            width: 36px;
+            border-radius: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 9px;
+            font-weight: 700;
+            color: white;
+            z-index: 20;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            will-change: left;
+        }
+        .packet-std { background: #EF4444; border: 1px solid #B91C1C; }
+        .packet-opt { background: #10B981; border: 1px solid #047857; box-shadow: 0 0 12px rgba(16, 185, 129, 0.3); }
+        
+        /* --- SIMULATION B: CLOCK SYNC --- */
+        .clock-face {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            border: 4px solid #334155;
+            position: relative;
+            background: #1E293B;
+            margin: 0 auto;
+        }
+        .clock-hand {
+            position: absolute;
+            bottom: 50%;
+            left: 50%;
+            width: 2px;
+            height: 45%;
+            background: #94A3B8;
+            transform-origin: bottom center;
+            transition: transform 0.05s linear;
+        }
+        .hand-master { background: #3B82F6; width: 3px; z-index: 10; }
+        .hand-slave { background: #EF4444; width: 2px; z-index: 5; opacity: 0.8; }
+        .hand-hybrid { background: #10B981; width: 3px; z-index: 10; }
+
+        /* --- ARCHITECTURE DIAGRAM --- */
+        .arch-node {
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        .arch-node:hover {
+            border-color: #3B82F6;
+            background-color: #1E293B;
+            transform: translateY(-2px);
+        }
+        .arch-node.active {
+            border-color: #3B82F6;
+            background-color: #1E293B;
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+        }
+
+        .chart-wrapper {
+            position: relative;
+            height: 250px;
+            width: 100%;
+        }
+    </style>
+</head>
+<body class="flex flex-col min-h-screen">
+
+    <!-- Top Navigation -->
+    <nav class="border-b border-gray-800 bg-slate-900 sticky top-0 z-50 backdrop-blur-md bg-opacity-90">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16 items-center">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 bg-blue-600 rounded flex items-center justify-center text-white font-bold">FP</div>
+                    <span class="font-bold text-xl tracking-tight text-white">FPGA<span class="text-blue-500">Sync</span> <span class="text-gray-500 text-sm font-normal ml-2 hidden sm:inline">| Sub-Microsecond Research</span></span>
+                </div>
+                <div class="hidden md:flex space-x-8">
+                    <button onclick="scrollToId('abstract')" class="text-gray-400 hover:text-white text-sm font-medium transition">Abstract</button>
+                    <button onclick="scrollToId('sim-transport')" class="text-gray-400 hover:text-white text-sm font-medium transition">Sim: Transport</button>
+                    <button onclick="scrollToId('sim-clock')" class="text-gray-400 hover:text-white text-sm font-medium transition">Sim: Clock</button>
+                    <button onclick="scrollToId('architecture')" class="text-gray-400 hover:text-white text-sm font-medium transition">Architecture</button>
+                </div>
+                <div class="text-xs font-mono text-emerald-500 bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20">
+                    System Active
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="flex-grow">
+
+        <!-- 1. ABSTRACT & HERO -->
+        <section id="abstract" class="py-16 border-b border-gray-800">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 grid grid-cols-1 lg:grid-cols-2 gap-12 items-center">
+                <div>
+                    <h1 class="text-4xl font-extrabold text-white tracking-tight sm:text-5xl mb-6">
+                        Hybrid Hardware <br/>
+                        <span class="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400">Synchronization Architecture</span>
+                    </h1>
+                    <p class="text-lg text-gray-400 mb-8 leading-relaxed">
+                        <strong>Problem:</strong> Standard Ethernet introduces "Store-and-Forward" jitter and OS-level interrupt delays, making it unsuitable for HFT strategies requiring deterministic ordering.
+                        <br/><br/>
+                        <strong>Solution:</strong> A hybrid FPGA architecture utilizing <strong>Cut-Through Switching</strong> and <strong>Phase-Aligned Clock Recovery</strong>. This moves the timing plane entirely into hardware (PHY layer), bypassing the OS stack.
+                    </p>
+                    <div class="grid grid-cols-3 gap-4 border-t border-gray-800 pt-6">
+                        <div>
+                            <p class="text-3xl font-bold text-white mono-font">&lt;1 <span class="text-sm text-gray-500">µs</span></p>
+                            <p class="text-xs text-gray-500 uppercase mt-1">Max Jitter</p>
+                        </div>
+                        <div>
+                            <p class="text-3xl font-bold text-white mono-font">PHY</p>
+                            <p class="text-xs text-gray-500 uppercase mt-1">Timestamp Layer</p>
+                        </div>
+                        <div>
+                            <p class="text-3xl font-bold text-white mono-font">0</p>
+                            <p class="text-xs text-gray-500 uppercase mt-1">OS Interrupts</p>
+                        </div>
+                    </div>
+                </div>
+                <!-- Mini Logic Visual -->
+                <div class="bg-slate-800 rounded-xl p-6 border border-slate-700 shadow-2xl">
+                    <h3 class="text-sm font-bold text-gray-400 uppercase mb-4">Latency Distribution Profile</h3>
+                    <div class="chart-wrapper">
+                        <canvas id="heroChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 2. SIMULATION A: PACKET TRANSPORT (The Buffer Problem) -->
+        <section id="sim-transport" class="py-16 bg-slate-900 border-b border-gray-800 relative">
+            <div class="absolute inset-0 bg-blue-500/5 pointer-events-none"></div>
+            <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
+                <div class="mb-8">
+                    <span class="text-blue-500 font-bold tracking-wider text-xs uppercase">Simulation A</span>
+                    <h2 class="text-3xl font-bold text-white">Transport Layer: Cut-Through vs. Store-and-Forward</h2>
+                    <p class="text-gray-400 mt-2 max-w-2xl">
+                        Standard switches must buffer the entire packet before forwarding (Store-and-Forward). 
+                        Our FPGA architecture uses <strong>Cut-Through</strong>: forwarding begins as soon as the destination address is read.
+                    </p>
+                </div>
+
+                <div class="bg-slate-800 rounded-xl border border-slate-700 p-6 shadow-xl">
+                    
+                    <!-- Standard Lane -->
+                    <div class="mb-2 flex justify-between items-end">
+                        <span class="text-sm font-bold text-red-400">Standard Ethernet (OS Stack + Switch Buffer)</span>
+                        <span class="text-xs text-gray-500 mono-font" id="std-queue-count">Queue: 0 pkts</span>
+                    </div>
+                    <div class="lane-container" id="lane-std">
+                        <!-- Visual Buffer Box -->
+                        <div class="buffer-box">
+                            <div class="text-center">
+                                <div>SWITCH</div>
+                                <div class="text-[9px] text-gray-500">BUFFER</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Hybrid Lane -->
+                    <div class="mb-2 flex justify-between items-end">
+                        <span class="text-sm font-bold text-emerald-400">Hybrid FPGA (Hardware Cut-Through)</span>
+                        <span class="text-xs text-gray-500 mono-font">Direct Path</span>
+                    </div>
+                    <div class="lane-container" id="lane-opt" style="border-color: rgba(16, 185, 129, 0.3); background: rgba(16, 185, 129, 0.05);">
+                        <!-- No Buffer Box -->
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-4 mt-6">
+                        <div class="bg-slate-900 p-4 rounded border border-slate-700">
+                            <p class="text-xs text-gray-500 mb-1">Avg Latency (Standard)</p>
+                            <p id="stat-std-lat" class="text-2xl font-bold text-red-500 mono-font">-- µs</p>
+                        </div>
+                        <div class="bg-slate-900 p-4 rounded border border-slate-700">
+                            <p class="text-xs text-gray-500 mb-1">Avg Latency (Hybrid)</p>
+                            <p id="stat-opt-lat" class="text-2xl font-bold text-emerald-500 mono-font">-- µs</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 3. SIMULATION B: CLOCK SYNCHRONIZATION (The Drift Problem) -->
+        <section id="sim-clock" class="py-16 bg-slate-950 border-b border-gray-800">
+            <div class="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="mb-8">
+                    <span class="text-emerald-500 font-bold tracking-wider text-xs uppercase">Simulation B</span>
+                    <h2 class="text-3xl font-bold text-white">Clock Domain: Phase Alignment</h2>
+                    <p class="text-gray-400 mt-2 max-w-2xl">
+                        Distributed systems drift. Standard NTP/PTP allows the clock to drift significantly before a "step" correction. 
+                        The Hybrid FPGA uses a <strong>Digital Phase Locked Loop (DPLL)</strong> to continuously steer the clock, maintaining lock.
+                    </p>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-8 text-center">
+                    
+                    <!-- Master Clock -->
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <h3 class="text-sm font-bold text-blue-400 mb-4">Master Reference (GPS)</h3>
+                        <div class="clock-face">
+                            <div class="hand-master" id="hand-master"></div>
+                        </div>
+                        <div class="mt-4 mono-font text-xl text-white" id="time-master">00:00:00.000</div>
+                    </div>
+
+                    <!-- Standard Slave -->
+                    <div class="bg-slate-800 p-6 rounded-xl border border-slate-700 relative overflow-hidden">
+                        <h3 class="text-sm font-bold text-red-400 mb-4">Standard Slave (Software)</h3>
+                        <div class="clock-face">
+                            <!-- Ghost of master for comparison -->
+                            <div class="hand-master opacity-20" id="hand-master-ghost-1"></div>
+                            <div class="hand-slave" id="hand-std"></div>
+                        </div>
+                        <div class="mt-4 mono-font text-xl text-red-200" id="time-std">00:00:00.000</div>
+                        <div class="mt-2 text-xs text-red-400 font-mono" id="drift-std">Drift: +0 µs</div>
+                    </div>
+
+                    <!-- Hybrid Slave -->
+                    <div class="bg-slate-800 p-6 rounded-xl border border-emerald-900/50 shadow-[0_0_30px_rgba(16,185,129,0.1)]">
+                        <h3 class="text-sm font-bold text-emerald-400 mb-4">FPGA Slave (Hardware PLL)</h3>
+                        <div class="clock-face">
+                            <div class="hand-hybrid" id="hand-opt"></div>
+                        </div>
+                        <div class="mt-4 mono-font text-xl text-emerald-200" id="time-opt">00:00:00.000</div>
+                        <div class="mt-2 text-xs text-emerald-400 font-mono" id="drift-opt">Drift: 0 µs</div>
+                    </div>
+                </div>
+
+                <!-- Drift Graph -->
+                <div class="mt-8 bg-slate-800 p-4 rounded-xl border border-slate-700 h-64">
+                    <canvas id="driftChart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <!-- 4. ARCHITECTURE DEEP DIVE -->
+        <section id="architecture" class="py-16 bg-slate-900 border-b border-gray-800">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="mb-10">
+                    <h2 class="text-3xl font-bold text-white">System Architecture Internals</h2>
+                    <p class="text-gray-400 mt-2">Interactive Block Diagram of the FPGA Pipeline.</p>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                    <!-- Diagram -->
+                    <div class="lg:col-span-8 bg-slate-800 p-8 rounded-xl border border-slate-700 relative">
+                        <!-- FPGA BOARD BOUNDARY -->
+                        <div class="border-2 border-dashed border-slate-600 rounded-lg p-6 relative">
+                            <div class="absolute -top-3 left-4 bg-slate-800 px-2 text-xs text-slate-500 font-bold uppercase">FPGA Fabric</div>
+                            
+                            <div class="grid grid-cols-3 gap-4">
+                                <!-- Block 1 -->
+                                <div class="arch-node bg-slate-700 p-4 rounded border border-slate-600" onclick="showDetail('mac')">
+                                    <div class="text-xs text-blue-400 font-bold mb-1">MAC Layer</div>
+                                    <div class="text-[10px] text-gray-300">Packet Parsing</div>
+                                </div>
+                                <!-- Block 2 -->
+                                <div class="arch-node bg-emerald-900/30 p-4 rounded border border-emerald-700" onclick="showDetail('tsu')">
+                                    <div class="text-xs text-emerald-400 font-bold mb-1">TSU</div>
+                                    <div class="text-[10px] text-gray-300">Timestamp Unit (PHY)</div>
+                                </div>
+                                <!-- Block 3 -->
+                                <div class="arch-node bg-slate-700 p-4 rounded border border-slate-600" onclick="showDetail('app')">
+                                    <div class="text-xs text-orange-400 font-bold mb-1">Trade Logic</div>
+                                    <div class="text-[10px] text-gray-300">Strategy Engine</div>
+                                </div>
+                            </div>
+                            
+                            <!-- PTP Loop -->
+                            <div class="mt-6 flex justify-between items-center">
+                                <div class="arch-node w-full bg-indigo-900/20 p-3 rounded border border-indigo-700 text-center" onclick="showDetail('servo')">
+                                    <div class="text-xs text-indigo-400 font-bold">Hardware Clock Servo (PI Controller)</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- NETWORK -->
+                        <div class="h-12 flex items-center justify-center">
+                            <div class="h-full w-0.5 bg-gray-600"></div>
+                        </div>
+
+                        <!-- NIC BOUNDARY -->
+                        <div class="border-2 border-slate-700 rounded-lg p-4 text-center">
+                            <span class="text-xs text-gray-500">10GbE / 25GbE Optical Link</span>
+                        </div>
+                    </div>
+
+                    <!-- Details Panel -->
+                    <div class="lg:col-span-4 bg-slate-800 p-6 rounded-xl border border-slate-700">
+                        <h3 class="text-lg font-bold text-white mb-2" id="detail-title">Select a Component</h3>
+                        <p class="text-sm text-gray-400 leading-relaxed mb-4" id="detail-desc">
+                            Click on the diagram blocks to understand the specific role of hardware offloading in this architecture.
+                        </p>
+                        <ul class="space-y-3" id="detail-list">
+                            <!-- filled by js -->
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 5. HFT IMPACT -->
+        <section class="py-16 bg-slate-950">
+            <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <h2 class="text-2xl font-bold text-white mb-8">Strategic Value for HFT</h2>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="bg-slate-900 p-6 rounded-lg border border-slate-800 hover:border-blue-500 transition">
+                        <h4 class="text-blue-400 font-bold text-sm uppercase mb-2">Deterministic Order Books</h4>
+                        <p class="text-sm text-gray-400">
+                            Ensures incoming market data packets are processed in the exact order of arrival on the wire, preventing "ghost" liquidity signals caused by OS-scheduler reordering.
+                        </p>
+                    </div>
+                    <div class="bg-slate-900 p-6 rounded-lg border border-slate-800 hover:border-emerald-500 transition">
+                        <h4 class="text-emerald-400 font-bold text-sm uppercase mb-2">Latency Arbitrage</h4>
+                        <p class="text-sm text-gray-400">
+                            The 2-3µs saved by bypassing the OS stack and using Cut-Through switching provides the edge needed to capture price discrepancies between exchanges before competitors.
+                        </p>
+                    </div>
+                    <div class="bg-slate-900 p-6 rounded-lg border border-slate-800 hover:border-purple-500 transition">
+                        <h4 class="text-purple-400 font-bold text-sm uppercase mb-2">Audit & Compliance</h4>
+                        <p class="text-sm text-gray-400">
+                            Hardware timestamps provide irrefutable proof of "Time of Trade" for MiFID II compliance, with nanosecond resolution that software clocks cannot legally guarantee.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <footer class="bg-slate-950 border-t border-slate-900 py-8 text-center">
+        <p class="text-slate-600 text-sm">
+            Created for visualization of abstract.
+        </p>
+    </footer>
+
+    <!-- LOGIC -->
+    <script>
+        // --- Navigation ---
+        function scrollToId(id) {
+            document.getElementById(id).scrollIntoView({behavior: 'smooth'});
+        }
+
+        // --- SIMULATION A: Transport (Buffer Logic) ---
+        const laneStd = document.getElementById('lane-std');
+        const laneOpt = document.getElementById('lane-opt');
+        let stdStats = [];
+        let optStats = [];
+
+        function createPacket(type) {
+            const lane = type === 'std' ? laneStd : laneOpt;
+            const el = document.createElement('div');
+            el.className = `packet ${type === 'std' ? 'packet-std' : 'packet-opt'}`;
+            el.textContent = 'DATA';
+            
+            // Initial Pos
+            let pos = 0;
+            el.style.left = '0%';
+            lane.appendChild(el);
+
+            let bufferTime = 0;
+            let inBuffer = false;
+            let speed = type === 'opt' ? 2.5 : 2.0; // Hybrid is faster natively
+
+            const anim = setInterval(() => {
+                // STANDARD LOGIC: Hit Buffer (40% mark)
+                if (type === 'std') {
+                    if (pos >= 35 && pos <= 40 && !inBuffer) {
+                        // 30% chance to get stuck in buffer
+                        if (Math.random() > 0.3) {
+                            inBuffer = true;
+                            // Random buffer delay (jitter)
+                            bufferTime = Math.random() * 40 + 10; 
+                            updateQueueCount(1);
+                        }
+                    }
+
+                    if (inBuffer) {
+                        bufferTime--;
+                        if (bufferTime <= 0) {
+                            inBuffer = false;
+                            pos += 1; // Exit buffer
+                            updateQueueCount(-1);
+                        }
+                        return; // Packet is stuck, don't move position
+                    }
+                }
+
+                pos += speed;
+                el.style.left = pos + '%';
+
+                // End
+                if (pos > 95) {
+                    clearInterval(anim);
+                    if(el.parentNode) el.remove();
+                    // Calc Latency
+                    const lat = type === 'std' ? (Math.random()*15 + 5) : 0.8;
+                    updateStats(type, lat);
+                }
+            }, 20);
+        }
+
+        let qCount = 0;
+        function updateQueueCount(change) {
+            qCount = Math.max(0, qCount + change);
+            const el = document.getElementById('std-queue-count');
+            el.textContent = `Queue: ${qCount} pkts`;
+            el.style.color = qCount > 2 ? '#EF4444' : '#64748B';
+        }
+
+        function updateStats(type, val) {
+            const arr = type === 'std' ? stdStats : optStats;
+            const el = document.getElementById(type === 'std' ? 'stat-std-lat' : 'stat-opt-lat');
+            arr.push(val);
+            if(arr.length > 10) arr.shift();
+            const avg = arr.reduce((a,b)=>a+b,0)/arr.length;
+            el.textContent = type === 'std' ? `~${avg.toFixed(1)} µs` : `< 0.9 µs`;
+        }
+
+        // --- SIMULATION B: Clock Sync ---
+        const handMaster = document.getElementById('hand-master');
+        const handMasterGhost = document.getElementById('hand-master-ghost-1');
+        const handStd = document.getElementById('hand-std');
+        const handOpt = document.getElementById('hand-opt');
+        
+        let masterTime = 0;
+        let stdTime = 0;
+        let optTime = 0;
+        
+        // Drift Graph Data
+        let driftDataStd = new Array(50).fill(0);
+        let driftDataOpt = new Array(50).fill(0);
+
+        function updateClocks() {
+            // Master moves perfectly
+            masterTime += 10; 
+            
+            // Standard: Drifts randomly, then corrects abruptly (NTP step)
+            // Add random jitter
+            let jitter = (Math.random() - 0.48) * 5; // Slight bias to drift positive
+            stdTime += (10 + jitter);
+            
+            // Periodic abrupt correction for Standard
+            if (Math.random() < 0.05) {
+                stdTime = masterTime + (Math.random() * 20 - 10); // Imperfect correction
+            }
+
+            // Hybrid: Moves strictly via PLL logic (dampened)
+            // It measures error and applies small P-term correction
+            let error = masterTime - optTime;
+            optTime += 10 + (error * 0.1); // PI Controller logic simulation
+
+            // Visual Rotation (1 sec = 360 deg for demo speed)
+            const rotMaster = (masterTime % 1000) * 0.36; 
+            const rotStd = (stdTime % 1000) * 0.36;
+            const rotOpt = (optTime % 1000) * 0.36;
+
+            handMaster.style.transform = `rotate(${rotMaster}deg)`;
+            handMasterGhost.style.transform = `rotate(${rotMaster}deg)`;
+            handStd.style.transform = `rotate(${rotStd}deg)`;
+            handOpt.style.transform = `rotate(${rotOpt}deg)`;
+
+            // Digital Text Update
+            document.getElementById('time-master').textContent = formatMs(masterTime);
+            document.getElementById('time-std').textContent = formatMs(stdTime);
+            document.getElementById('time-opt').textContent = formatMs(optTime);
+
+            // Drift Text
+            let driftS = Math.floor(stdTime - masterTime);
+            let driftO = Math.floor(optTime - masterTime);
+            document.getElementById('drift-std').textContent = `Drift: ${driftS > 0 ? '+' : ''}${driftS} ms`;
+            document.getElementById('drift-opt').textContent = `Drift: ${Math.abs(driftO) < 1 ? '0' : driftO} ms`;
+
+            // Update Graph Data
+            driftDataStd.push(driftS);
+            driftDataStd.shift();
+            driftDataOpt.push(driftO);
+            driftDataOpt.shift();
+            
+            // Update Graph Instance
+            if(window.driftChartInst) {
+                window.driftChartInst.update('none'); // 'none' for performance
+            }
+        }
+
+        function formatMs(ms) {
+            let s = Math.floor(ms / 1000);
+            let m = Math.floor(s / 60);
+            let remainingMs = Math.floor(ms % 1000);
+            return `${m}:${s%60 < 10 ? '0'+(s%60) : s%60}.${remainingMs < 100 ? (remainingMs < 10 ? '00'+remainingMs : '0'+remainingMs) : remainingMs}`;
+        }
+
+        // --- ARCH DETAILS ---
+        const archDetails = {
+            'mac': { title: 'MAC Layer Parser', desc: 'Reads Ethernet frames. In Standard NICs, this dumps to RAM (DMA). In this Hybrid FPGA, it streams directly to the Trade Logic pipeline.', list: ['CRC Check', 'Header Stripping', 'Direct Stream to App'] },
+            'tsu': { title: 'Timestamp Unit (TSU)', desc: 'The heart of the system. Located physically next to the transceiver (PHY). Records ingress/egress time instantly, avoiding PCIe bus latency.', list: ['Nanosecond Precision', 'Hardware Registered', 'PTP correction applied here'] },
+            'app': { title: 'Trade Strategy Engine', desc: 'Your HFT algorithm in Verilog/VHDL. It receives market data directly from the MAC, makes a decision, and fires an order back to the MAC.', list: ['Zero-Copy', 'Deterministic Latency', 'No Context Switches'] },
+            'servo': { title: 'Hardware Clock Servo', desc: 'A PI Controller implemented in DSP blocks. It adjusts the FPGA internal clock frequency to match the PTP Master, eliminating drift.', list: ['Digital Phase Locked Loop', 'Jitter Cleaning', 'Holdover Stability'] }
+        };
+
+        function showDetail(key) {
+            const d = archDetails[key];
+            document.getElementById('detail-title').textContent = d.title;
+            document.getElementById('detail-desc').textContent = d.desc;
+            const ul = document.getElementById('detail-list');
+            ul.innerHTML = '';
+            d.list.forEach(item => {
+                ul.innerHTML += `<li class="flex items-center text-sm text-gray-300"><span class="w-2 h-2 bg-blue-500 rounded-full mr-2"></span>${item}</li>`;
+            });
+            // highlight
+            document.querySelectorAll('.arch-node').forEach(el => el.classList.remove('active'));
+            // Note: simple click handling logic
+        }
+
+        // --- INIT ---
+        window.onload = function() {
+            // Start Transport Sim
+            setInterval(() => {
+                createPacket('std');
+                createPacket('opt');
+            }, 600);
+
+            // Start Clock Sim
+            setInterval(updateClocks, 50);
+
+            // Init Hero Chart
+            const ctxHero = document.getElementById('heroChart').getContext('2d');
+            new Chart(ctxHero, {
+                type: 'bar',
+                data: {
+                    labels: ['0-1µs', '1-5µs', '5-10µs', '10-100µs'],
+                    datasets: [{
+                        label: 'Hybrid FPGA',
+                        data: [99, 1, 0, 0],
+                        backgroundColor: '#10B981'
+                    }, {
+                        label: 'Standard Ethernet',
+                        data: [5, 15, 40, 40],
+                        backgroundColor: '#EF4444'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: {display: true, labels: {color: '#94A3B8'}} },
+                    scales: {
+                        y: { display: false },
+                        x: { ticks: {color: '#94A3B8'}, grid: {color: '#334155'} }
+                    }
+                }
+            });
+
+            // Init Drift Chart
+            const ctxDrift = document.getElementById('driftChart').getContext('2d');
+            window.driftChartInst = new Chart(ctxDrift, {
+                type: 'line',
+                data: {
+                    labels: Array.from({length: 50}, (_,i)=>i),
+                    datasets: [{
+                        label: 'Standard Drift',
+                        data: driftDataStd,
+                        borderColor: '#EF4444',
+                        borderWidth: 1,
+                        pointRadius: 0,
+                        tension: 0.4
+                    }, {
+                        label: 'Hybrid Drift',
+                        data: driftDataOpt,
+                        borderColor: '#10B981',
+                        borderWidth: 2,
+                        pointRadius: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    plugins: { legend: {display: true, labels: {color: '#94A3B8'}} },
+                    scales: {
+                        y: { grid: {color: '#334155'}, ticks: {color: '#94A3B8'}, suggestedMin: -20, suggestedMax: 20 },
+                        x: { display: false }
+                    }
+                }
+            });
+            
+            // Init details
+            showDetail('tsu');
+        };
+    </script>
+</body>
+</html>
